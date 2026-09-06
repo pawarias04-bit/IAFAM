@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Entorno y secretos (NUNCA subir a git)
+.env
+*.env.local
+
+# Archivos de datos locales (la BD SQLite de desarrollo)
+backend/data.db
+*.db
+*.sqlite3
+
+# Node / React
+node_modules/
+dist/
+build/
+.vite/
+
+# Sistema
+.DS_Store
+Thumbs.db

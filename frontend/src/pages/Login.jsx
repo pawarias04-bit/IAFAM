@@ -1,11 +1,15 @@
-// LOGIN: formulario de acceso.
+// ACCESO: email y contraseña.
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { Lock, Mail } from 'lucide-react'
+import { Alert, Button, GlassPanel, Input } from '../components/ui/index.js'
 import { login } from '../api.js'
+import { useAuth } from '../auth.jsx'
 
 export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const { notice } = useAuth()
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
@@ -15,9 +19,8 @@ export default function Login() {
     setLoading(true)
     setError('')
     try {
-      const data = await login({ email, password })
-      // Redirigimos según el rol: admin → panel, resto → home
-      navigate(data.role === 'ADMIN' ? '/admin' : '/')
+      const user = await login({ email, password })
+      navigate(['ADMIN', 'MODERATOR'].includes(user.role) ? '/admin' : '/')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -26,36 +29,41 @@ export default function Login() {
   }
 
   return (
-    <div className="card form-card">
-      <h2>Iniciar sesión</h2>
-      {error && <div className="form-error">{error}</div>}
-      <form onSubmit={handleSubmit}>
-        <div className="form-group">
-          <label>Email</label>
-          <input
+    <div className="auth">
+      <GlassPanel strong className="auth-card">
+        <h1 className="auth-title">Inicia sesión</h1>
+        <p className="auth-text">Retoma tu búsqueda y consulta las ofertas que guardaste.</p>
+
+        <form className="form-stack" onSubmit={handleSubmit}>
+          <Alert>{error || notice}</Alert>
+          <Input
+            label="Email"
             type="email"
+            icon={Mail}
+            autoComplete="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
             autoFocus
           />
-        </div>
-        <div className="form-group">
-          <label>Contraseña</label>
-          <input
+          <Input
+            label="Contraseña"
             type="password"
+            icon={Lock}
+            autoComplete="current-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
-        </div>
-        <button className="btn btn-primary btn-block" disabled={loading}>
-          {loading ? 'Entrando...' : 'Entrar'}
-        </button>
-      </form>
-      <p className="muted" style={{ marginTop: 16 }}>
-        ¿No tienes cuenta? <Link to="/register">Regístrate</Link>
-      </p>
+          <Button type="submit" size="lg" loading={loading} block>
+            {loading ? 'Entrando…' : 'Entrar'}
+          </Button>
+        </form>
+
+        <p className="auth-foot">
+          ¿Aún no tienes cuenta? <Link to="/register">Crea una gratis</Link>
+        </p>
+      </GlassPanel>
     </div>
   )
 }

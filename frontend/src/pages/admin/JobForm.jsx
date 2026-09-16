@@ -1,40 +1,78 @@
-// JobForm: formulario de oferta, sirve para CREAR (/admin/jobs/new) y
-// EDITAR (/admin/jobs/:id/edit). Detecta el modo viendo si hay :id en la URL.
+// FORMULARIO DE OFERTA (backoffice): sirve para crear (/admin/jobs/new) y
+// editar (/admin/jobs/:id/edit). Detecta el modo viendo si hay :id.
+//
+// Los campos de contenido son los mismos que usa el portal de empresas
+// (components/JobFields.jsx); aquí se añade la sección de publicación, que
+// solo controla el equipo.
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import JobFields, {
+  JOB_CONTENT_EMPTY, jobContentPayload, validateJobContent,
+} from '../../components/JobFields.jsx'
+import {
+  Alert, Button, GlassPanel, Loader, Select, useToast,
+} from '../../components/ui/index.js'
 import {
   adminCreateJob, adminGetJob, adminUpdateJob, fetchCategories,
-  fetchCompanies, fetchSkills,
+  fetchCompanies, fetchJobStatusTransitions, fetchSkills,
 } from '../../api.js'
+import { useAuth } from '../../auth.jsx'
+import {
+  NEW_JOB_STATUSES, STATUS_LABEL, VERIFICATION_LABEL, statusOptionsFor, toOptions,
+} from '../../lib/labels.js'
 
-const EMPTY = {
-  title: '', description: '', company_id: '', category_id: '',
-  experience_level: '', work_mode: '', employment_type: 'FULL_TIME',
-  salary_min: '', salary_max: '', currency: '', deadline: '',
-  contact_email: '', apply_url: '', status: 'DRAFT',
-  verification_status: 'PENDING', skill_ids: [],
+const EMPTY = { ...JOB_CONTENT_EMPTY, status: 'DRAFT', verification_status: 'PENDING' }
+
+// Postgres devuelve null en las columnas vacias, y un <input value={null}>
+// deja de ser controlado (React avisa en consola). Se quitan esas claves
+// para que prevalezca el '' de EMPTY.
+function withoutNulls(obj) {
+  return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== null))
+}
+
+// Una oferta nueva nace como Borrador o En revisión; Publicada solo si el
+// rol puede publicar (BO-030 y BO-033).
+function newStatusOptions(canPublish) {
+  return NEW_JOB_STATUSES
+    .filter((s) => s !== 'ACTIVE' || canPublish)
+    .map((value) => ({ value, label: STATUS_LABEL[value] }))
 }
 
 export default function JobForm() {
-  const { id } = useParams()          // si existe id → modo edición
+  const { id } = useParams()
   const isEdit = Boolean(id)
   const navigate = useNavigate()
+  const toast = useToast()
+  const { can } = useAuth()
+  const canPublish = can('jobs.publish')
+  const canVerify = can('jobs.verify')
 
   const [form, setForm] = useState(EMPTY)
+  // Estado con el que se cargó la oferta: las transiciones se calculan
+  // desde aquí, no desde lo que se va eligiendo en el formulario.
+  const [savedStatus, setSavedStatus] = useState(null)
+  const [transitions, setTransitions] = useState({})
   const [companies, setCompanies] = useState([])
   const [categories, setCategories] = useState([])
   const [skills, setSkills] = useState([])
   const [error, setError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState({})
   const [loading, setLoading] = useState(isEdit)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    Promise.all([fetchCompanies(), fetchCategories(), fetchSkills()])
-      .then(([c, cat, s]) => { setCompanies(c); setCategories(cat); setSkills(s) })
+    Promise.all([fetchCompanies(), fetchCategories(), fetchSkills(), fetchJobStatusTransitions()])
+      .then(([c, cat, s, t]) => { setCompanies(c); setCategories(cat); setSkills(s); setTransitions(t) })
       .catch((e) => setError(e.message))
 
     if (isEdit) {
       adminGetJob(id)
-        .then((job) => setForm({ ...EMPTY, ...job, skill_ids: job.skills || [] }))
+        // skill_ids son los ids (para premarcar las casillas); job.skills
+        // son los nombres, que solo sirven para mostrar.
+        .then((job) => {
+          setForm({ ...EMPTY, ...withoutNulls(job), skill_ids: job.skill_ids || [] })
+          setSavedStatus(job.status)
+        })
         .catch((e) => setError(e.message))
         .finally(() => setLoading(false))
     }
@@ -42,183 +80,93 @@ export default function JobForm() {
 
   function setField(field, value) {
     setForm((prev) => ({ ...prev, [field]: value }))
-  }
-
-  // toogleSkill mantiene la lista de skill_ids seleccionados.
-  function toggleSkill(skillId) {
-    setForm((prev) => {
-      const has = prev.skill_ids.includes(skillId)
-      return {
-        ...prev,
-        // Si ya está, se quita de la lista; si no, se agrega.
-        skill_ids: has ? prev.skill_ids.filter((s) => s !== skillId)
-                        : [...prev.skill_ids, skillId],
-      }
-    })
+    setFieldErrors((prev) => ({ ...prev, [field]: undefined }))
   }
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
+    const errors = validateJobContent(form)
+    setFieldErrors(errors)
+    if (Object.keys(errors).length) return
+
     const payload = {
-      title: form.title, description: form.description,
-      company_id: Number(form.company_id),
-      category_id: form.category_id ? Number(form.category_id) : null,
-      experience_level: form.experience_level || null,
-      work_mode: form.work_mode || null,
-      employment_type: form.employment_type || null,
-      salary_min: form.salary_min || null,
-      salary_max: form.salary_max || null,
-      currency: form.currency || null,
-      deadline: form.deadline || null,
-      contact_email: form.contact_email || null,
-      apply_url: form.apply_url || null,
-      status: form.status, verification_status: form.verification_status,
-      skill_ids: form.skill_ids,
+      ...jobContentPayload(form),
+      status: form.status,
+      verification_status: form.verification_status,
     }
+
+    setSaving(true)
     try {
       if (isEdit) await adminUpdateJob(id, payload)
       else await adminCreateJob(payload)
+      toast.success(isEdit ? 'Cambios guardados' : 'Oferta creada')
       navigate('/admin/jobs')
     } catch (err) {
       setError(err.message)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } finally {
+      setSaving(false)
     }
   }
 
-  if (loading) return <div className="loading">⏳ Cargando oferta...</div>
+  if (loading) return <Loader label="Cargando oferta…" />
 
   return (
-    <div className="stack" style={{ maxWidth: 820 }}>
+    <form onSubmit={handleSubmit}>
       <div className="page-head">
-        <h1>{isEdit ? '✏️ Editar oferta' : '➕ Nueva oferta'}</h1>
+        <div>
+          <h1 className="page-title">{isEdit ? 'Editar oferta' : 'Publicar oferta'}</h1>
+          <p className="page-subtitle">
+            Los campos con asterisco son obligatorios. El resto ayuda a que la encuentren.
+          </p>
+        </div>
       </div>
 
-      <form className="card" onSubmit={handleSubmit}>
-        {error && <div className="form-error">{error}</div>}
+      <GlassPanel strong>
+        <Alert>{error}</Alert>
 
-        <div className="form-group">
-          <label>Título *</label>
-          <input value={form.title} onChange={(e) => setField('title', e.target.value)} required />
-        </div>
-        <div className="form-group">
-          <label>Descripción *</label>
-          <textarea value={form.description} onChange={(e) => setField('description', e.target.value)} required />
-        </div>
+        <JobFields
+          form={form}
+          setField={setField}
+          companies={companies}
+          categories={categories}
+          skills={skills}
+          fieldErrors={fieldErrors}
+        />
 
-        <div className="form-grid">
-          <div className="form-group">
-            <label>Empresa *</label>
-            <select value={form.company_id} onChange={(e) => setField('company_id', e.target.value)} required>
-              <option value="">Selecciona...</option>
-              {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+        <section className="form-section">
+          <h2 className="form-section-title">Publicación</h2>
+          <p className="form-section-text">Solo las ofertas con estado Publicada aparecen en el buscador.</p>
+          <div className="form-grid">
+            <Select
+              label="Estado"
+              options={isEdit ? statusOptionsFor(savedStatus, transitions) : newStatusOptions(canPublish)}
+              value={form.status}
+              onChange={(e) => setField('status', e.target.value)}
+              disabled={isEdit && !canPublish}
+              hint={isEdit && !canPublish ? 'Tu rol no puede cambiar el estado.' : undefined}
+            />
+            <Select
+              label="Verificación"
+              options={toOptions(VERIFICATION_LABEL)}
+              value={form.verification_status}
+              onChange={(e) => setField('verification_status', e.target.value)}
+              disabled={!canVerify}
+              hint={!canVerify ? 'Tu rol no puede verificar ofertas.' : undefined}
+            />
           </div>
-          <div className="form-group">
-            <label>Área</label>
-            <select value={form.category_id} onChange={(e) => setField('category_id', e.target.value)}>
-              <option value="">—</option>
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Nivel</label>
-            <select value={form.experience_level} onChange={(e) => setField('experience_level', e.target.value)}>
-              <option value="">—</option>
-              <option value="INTERNSHIP">Prácticas</option>
-              <option value="JUNIOR">Junior</option>
-              <option value="MID">Mid</option>
-              <option value="SENIOR">Senior</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Modalidad</label>
-            <select value={form.work_mode} onChange={(e) => setField('work_mode', e.target.value)}>
-              <option value="">—</option>
-              <option value="REMOTE">Remoto</option>
-              <option value="HYBRID">Híbrido</option>
-              <option value="ON_SITE">Presencial</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Tipo</label>
-            <select value={form.employment_type} onChange={(e) => setField('employment_type', e.target.value)}>
-              <option value="FULL_TIME">Tiempo completo</option>
-              <option value="PART_TIME">Medio tiempo</option>
-              <option value="INTERNSHIP">Pasantía</option>
-              <option value="FREELANCE">Freelance</option>
-              <option value="CONTRACT">Contrato</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Fecha límite</label>
-            <input type="date" value={form.deadline} onChange={(e) => setField('deadline', e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Salario mínimo</label>
-            <input type="number" value={form.salary_min} onChange={(e) => setField('salary_min', e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Salario máximo</label>
-            <input type="number" value={form.salary_max} onChange={(e) => setField('salary_max', e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>Moneda</label>
-            <input value={form.currency} onChange={(e) => setField('currency', e.target.value)} placeholder="USD, EUR, CUP..." />
-          </div>
-          <div className="form-group">
-            <label>Estado</label>
-            <select value={form.status} onChange={(e) => setField('status', e.target.value)}>
-              <option value="DRAFT">Borrador</option>
-              <option value="PENDING_REVIEW">Pendiente de revisión</option>
-              <option value="ACTIVE">Activa (publicada)</option>
-              <option value="CLOSED">Cerrada</option>
-              <option value="REJECTED">Rechazada</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Verificación</label>
-            <select value={form.verification_status} onChange={(e) => setField('verification_status', e.target.value)}>
-              <option value="PENDING">Pendiente 🟡</option>
-              <option value="VERIFIED">Verificada 🟢</option>
-              <option value="REPORTED">Reportada 🔴</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label>Email de contacto</label>
-            <input type="email" value={form.contact_email} onChange={(e) => setField('contact_email', e.target.value)} />
-          </div>
-          <div className="form-group">
-            <label>URL de postulación</label>
-            <input value={form.apply_url} onChange={(e) => setField('apply_url', e.target.value)} placeholder="https://..." />
-          </div>
-        </div>
+        </section>
+      </GlassPanel>
 
-        <div className="form-group">
-          <label>Tecnologías / skills</label>
-          <div className="tags">
-            {skills.map((s) => (
-              <button
-                type="button"
-                key={s.id}
-                className={`chip ${form.skill_ids.includes(s.id) ? 'chip-skill' : 'chip-soft'}`}
-                onClick={() => toggleSkill(s.id)}
-                style={{ cursor: 'pointer', border: 'none' }}
-              >
-                {form.skill_ids.includes(s.id) ? '✓ ' : ''}{s.name}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="row">
-          <button className="btn btn-primary" type="submit">
-            {isEdit ? 'Guardar cambios' : 'Crear oferta'}
-          </button>
-          <button className="btn btn-outline" type="button" onClick={() => navigate('/admin/jobs')}>
-            Cancelar
-          </button>
-        </div>
-      </form>
-    </div>
+      <GlassPanel strong className="form-actions">
+        <Button variant="ghost" onClick={() => navigate('/admin/jobs')} disabled={saving}>
+          Cancelar
+        </Button>
+        <Button type="submit" loading={saving}>
+          {isEdit ? 'Guardar cambios' : 'Crear oferta'}
+        </Button>
+      </GlassPanel>
+    </form>
   )
 }
